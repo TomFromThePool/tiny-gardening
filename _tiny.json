@@ -30,5 +30,11 @@
     ],
     "scripts": [
         "game.lua"
+    ],
+    "spritesheets": [
+        "img/vegetables-buried.png",
+        "img/vegetables-overground.png",
+        "img/vegetables-tall.png",
+        "img/splash.png"
     ]
 }
