@@ -12,7 +12,10 @@ local TERRAIN_COLOURS = {
 local GAME_RUNTIME_CONFIG = {
     DEBUG_ENTITY_BOUNDS = false,
     DEBUG_ENTITY_PADDING = 5,
-    PAUSED = false
+    PAUSED = false,
+    DEBUG_ALLOW_GAME_END = true,
+    WATER_ADD_RATE = 0.01,
+    WATER_DECAY_RATE = 0.001
 }
 
 function setDebug(enabled)
@@ -80,18 +83,15 @@ local Plant = Entity:new({
     stage = 0
  })
 
- WATER_DECAY_RATE = 0.001
- WATER_ADD_RATE = 0.01
-
 function Plant:consumeWater()
-    local w = _clamp(0, self.water - WATER_DECAY_RATE, 1)
+    local w = _clamp(0, self.water - GAME_RUNTIME_CONFIG.WATER_DECAY_RATE, 1)
     self.water = w
 end
 
 function Plant:addWater()
     if(self:isClicked())
     then
-        self.water = _clamp(0, self.water + WATER_ADD_RATE, 1)
+        self.water = _clamp(0, self.water + GAME_RUNTIME_CONFIG.WATER_ADD_RATE, 1)
     end
 end
 
@@ -126,6 +126,10 @@ function Plant:draw()
     Entity.draw(self)
     spr.sheet(self.type)
     spr.sdraw(self.bounds.x, self.bounds.y - 16, self.stage * 16, self.species, 16, 30, false, false)
+
+    -- Water bar
+    shape.rectf(self.bounds.x, self.bounds.y + self.bounds.height + 4, self.bounds.width, 2, 2)
+    shape.rectf(self.bounds.x, self.bounds.y + self.bounds.height + 4, self.bounds.width * self.water, 2, 3)
     -- shape.circlef(self.bounds.x + self.radius, self.bounds.y + self.radius, self.radius, self.colour)
 end
 
@@ -384,8 +388,8 @@ WATER = 0
 SEEDS = 1
 
 TOOLS = {
-    WATER,
-    SEEDS
+    WATER = WATER,
+    SEEDS = SEEDS
 }
 
 local Cursor = Entity:new({
@@ -393,13 +397,126 @@ local Cursor = Entity:new({
     colour = 3
 })
 
+-- PARTICLES
+local Particles = {
+    x = {0}, -- x position of the particle
+    y = {0}, -- y position of the particle
+    radius = {4}, -- start radius of the particle
+    colors = {1}, -- color used to draw the particle
+    sx = 0, -- x speed of the particle
+    sy = 1, -- y speed of the particle
+    sr = 0.1, -- radius speed of the particle
+    ttl = 1, -- ttl, time to live in seconds. The particle is detroy when reach 0
+    particles = {} -- list of the particles managed by this particle generator
+}
+
+-- Update all particles of the generator
+-- This methods should be called by the user in the _update function.
+function Particles:_update()
+    --local colors = self.__asTable(self.colors)
+    --debug(#colors)
+    for k, v in rpairs(self.particles) do
+        v.x = v.x + v.sx
+        v.y = v.y + v.sy
+        v.r = v.r - v.sr
+        v.ttl = v.ttl - tiny.dt
+        v.frame = v.frame + 1
+        v.color = self.colors[math.min(#self.colors, v.frame)]
+        if v.ttl < 0 then
+            table.remove(self.particles, k)
+        end
+    end
+end
+
+-- Draw all particles of the generator
+-- This methods should be called by the user in the _draw function.
+function Particles:_draw()
+    for p in all(self.particles) do
+        self:__draw(p)
+    end
+end
+
+-- PRIVATE --
+
+local __Particle = {
+    x = 0,
+    y = 0,
+    r = 0,
+    sx = 0,
+    sy = 0,
+    sr = 0,
+    ttl = 0,
+    frame = 0,
+    color = 0
+}
+
+-- return the value or the random value of a table
+function Particles:__get(value)
+    if (type(value) == "table") then
+        return math.rnd(value)
+    else
+        return value
+    end
+end
+
+function Particles:__asTable(value)
+    if (type(value) == "table") then
+        return value
+    else
+        return {value}
+    end
+end
+
+function Particles:emit(number)
+    for i = 0, number do
+        table.insert(
+                self.particles,
+                new(
+                        __Particle,
+                        {
+                            x = self:__get(self.x),
+                            y = self:__get(self.y),
+                            r = self:__get(self.radius),
+                            sx = self:__get(self.sx),
+                            sy = self:__get(self.sy),
+                            sr = self:__get(self.sr),
+                            ttl = self:__get(self.ttl)
+                        }
+                )
+        )
+    end
+end
+
+function Particles:__draw(particle)
+    shape.circlef(particle.x, particle.y, particle.r, particle.color)
+end
+-- END PARTICLES
+
+WATER_PARTICLE_COLOURS = {2, 3, 4}
 function Cursor:new(o)
     o = o or {}
     o.count = 0
     o.using = false
     o.stage = 0
     o = Entity.new(self, o)
+
+    Cursor.setTool(self, o.tool)
+
     return o
+end
+
+function Cursor:initWaterParticles()
+    self.generator = new(Particles, {
+        x = { 0 },
+        y = { 0  },
+        sx = { 0 },
+        sy = 1,
+        colors = {2, 3, 4},
+        ttl = { 0.5 },
+        radius = { 0.25 },
+    })
+    self.generator.colors = WATER_PARTICLE_COLOURS
+    self.generator:_update()
 end
 
 function Cursor:update()
@@ -407,15 +524,12 @@ function Cursor:update()
     local t = ctrl.touch()
     self.bounds.x = t.x
     self.bounds.y = t.y
-    self.sprite = 25
+    
+    self:updateStatus()
+    self:updateTool()
+end
 
-    if(self.tool == TOOLS.WATER)
-    then
-        self.sprite = 25
-    elseif (self.tool == TOOLS.SEEDS)
-    then
-        self.sprite = 21
-    end
+function Cursor:updateStatus()
     if(ctrl.touched(0))
     then
         if(not self.using)
@@ -430,33 +544,81 @@ function Cursor:update()
         self.using = false
         self.count = 0
     end
+end
 
-    if(self.using)
+function Cursor:updateTool()
+        if(self.tool == TOOLS.WATER)
+        then
+            self:updateWater()
+        elseif (self.tool == TOOLS.SEEDS)
+        then
+            self:updateSeeds()
+        end
+end
+
+function Cursor:setTool(t)
+    if(t == TOOLS.WATER)
     then
-        self:updateWater()
+        self.tool = t
+        self:initWaterParticles()
+    elseif(t == TOOLS.SEEDS)
+    then
+        self.tool = t
     end
 end
 
 function Cursor:updateWater()
-    self.stage = _clamp(0, math.floor(((self.count) * (1 / 18) * 500)), 18)
-    if(self.stage >= 18)
+    if(self.using)
     then
-        self.count = 0
-        self.stage = 0
+        local p = ctrl.touch()
+        self.generator.x = { p.x, p.x - 3, p.x + 3 }
+        self.generator.y = { p.y - 20 , p.y - 20, p.y - 20}
+        self.generator.radius = 1
+        self.generator.sx = 0
+        self.generator.sy = 1
+        self.generator.ttl = 1
+        --self.generator.sr = math.rnd(1, 5)
+        self.generator:emit(3)
+        self.stage = _clamp(0, math.floor(((self.count) * (1 / 18) * 200)), 18)
+        if(self.stage >= 18)
+        then
+            self.count = 0
+            self.stage = 0
+        end
+    end
+
+    if(self.generator ~= nil)
+    then
+        self.generator:_update()
+    end
+end
+
+function Cursor:updateSeeds()
+    if(self.using)
+    then
     end
 end
 
 function Cursor:drawWater()
-    spr.sheet(3)
-    spr.sdraw(self.bounds.x - 16, self.bounds.y, self.stage * 18, 0, 16, 16, false, false)
+    if(self.using)
+    then
+        self.generator:_draw()
+        -- spr.sheet(3)
+        -- spr.sdraw(self.bounds.x - 8, self.bounds.y, self.stage * 18, 0, 16, 16, false, false)
+    end
 end
 
 function Cursor:draw()
     if(self.using)
     then
-        self:drawWater()
+        if(self.tool == TOOLS.WATER)
+        then
+            self:drawWater()
+        elseif (self.tool == TOOLS.SEEDS)
+        then
+            self:drawSeeds()
+        end
     end
-    --shape.circlef(self.bounds.x, self.bounds.y, 2, self.colour)
 end
 
 
@@ -555,7 +717,7 @@ function Game:update()
         end
     end
 
-    if(gameOver)
+    if(gameOver and GAME_RUNTIME_CONFIG.DEBUG_ALLOW_GAME_END)
     then
         setState(STATE_GAME_OVER)
     end
@@ -638,6 +800,10 @@ end
 
 function _update()
     STATES[GAME_STATE]:update()
+
+    if(ctrl.touched(0)) then
+        debug("touched")
+    end
 end
 
 function _draw()
