@@ -11,7 +11,7 @@ local TERRAIN_COLOURS = {
 
 local GAME_RUNTIME_CONFIG = {
     DEBUG_ENTITY_BOUNDS = false,
-    DEBUG_ENTITY_PADDING = 5,
+    DEBUG_ENTITY_PADDING = 0,
     PAUSED = false,
     DEBUG_ALLOW_GAME_END = true,
     WATER_ADD_RATE = 0.01,
@@ -22,10 +22,94 @@ function setDebug(enabled)
     GAME_RUNTIME_CONFIG.DEBUG_ENTITY_BOUNDS = enabled
 end
 
-local Entity = {}
+function Collision(a, b)
+    return function(fn) return fn(a, b) end
+end
+
+function _collision_a(a, b)
+    return a
+end
+
+function _collision_b(a, b)
+    return b
+end
+
+local EntityCollection = {entities = {}}
+function EntityCollection:new(o)
+    o = o or {}
+    setmetatable(o, self)
+    self.__index = self
+    self.entities = o.entities or {}
+    self.collisionMap = {}
+    return o
+end
+
+function EntityCollection:add(e)
+    for _, value in ipairs(self.entities) do
+        if(value.__entityId == e.__entityId)
+        then
+            --debug("Refusing to add entity " .. e.__entityId .. " - already exists")
+        else
+            table.insert(self.entities, e)
+        end
+    end
+end
+
+function EntityCollection:remove(e)
+    for i, value in ipairs(self.entities) do
+        if(value.__entityId == e.__entityId)
+        then
+            table.remove(self.entities, i)
+        end
+    end
+end
+
+function EntityCollection:colliding(a, b)
+    return a:overlaps(b)
+end
+
+function EntityCollection:checkCollisions()
+    --debug("Running collision checks for " .. #self.entities .. " entities")
+    for i, value in ipairs(self.collisionMap) do
+        local a = value(_collision_a)
+        local b = value(_collision_b)
+
+        if(not self:colliding(a, b))
+        then
+            table.remove(self.collisionMap, i)
+            a:endCollision(b)
+            b:endCollision(a)
+        end
+    end
+
+    for i = 1, #self.entities, 1 do
+        local a = self.entities[i]
+        local anyCollision = false
+        for x = i + 1, #self.entities, 1 do
+            local b = self.entities[x]
+            if(self:colliding(a, b))
+            then
+                anyCollision = true
+                table.insert(self.collisionMap, Collision(a, b))
+                a:collideWith(b)
+                b:collideWith(a)
+            end
+        end
+
+        if(a.colliding and not anyCollision)
+        then
+            a.colliding = false
+        end
+    end
+end
+
+ENTITY_ID_COUNTER = 0
+local Entity = {__entityId = ENTITY_ID_COUNTER}
 function Entity:new(o)
     o = o or {} -- create object if user does not provide one
     setmetatable(o, self)
+    ENTITY_ID_COUNTER = ENTITY_ID_COUNTER + 1
+    self.__entityId = ENTITY_ID_COUNTER
     self.__index = self
     self.bounds = o.bounds or {
         x = 0,
@@ -33,17 +117,25 @@ function Entity:new(o)
         width = 0,
         height = 0
     }
+    self.colliding = false
     return o
 end
+
+
 
 function Entity:update()
 
 end
 
 function Entity:draw()
-    if(GAME_RUNTIME_CONFIG.DEBUG_ENTITY_BOUNDS)
+    if(GAME_RUNTIME_CONFIG.DEBUG_ENTITY_BOUNDS or self.colliding)
     then
-        shape.rect(self.bounds.x - GAME_RUNTIME_CONFIG.DEBUG_ENTITY_PADDING, self.bounds.y - GAME_RUNTIME_CONFIG.DEBUG_ENTITY_PADDING, self.bounds.width + GAME_RUNTIME_CONFIG.DEBUG_ENTITY_PADDING * 2, self.bounds.height + GAME_RUNTIME_CONFIG.DEBUG_ENTITY_PADDING * 2, 1)
+        local debugColour = 1
+        if(self:containsPoint(ctrl.touch()))
+        then
+            debugColour = 8
+        end
+        shape.rect(self.bounds.x - GAME_RUNTIME_CONFIG.DEBUG_ENTITY_PADDING, self.bounds.y - GAME_RUNTIME_CONFIG.DEBUG_ENTITY_PADDING, self.bounds.width + GAME_RUNTIME_CONFIG.DEBUG_ENTITY_PADDING * 2, self.bounds.height + GAME_RUNTIME_CONFIG.DEBUG_ENTITY_PADDING * 2, debugColour)
     end
 end
 
@@ -52,6 +144,24 @@ function Entity:containsPoint(point)
         and point.x <= self.bounds.x + self.bounds.width
         and point.y >= self.bounds.y
         and point.y <= self.bounds.y + self.bounds.height)
+end
+
+function Entity:overlaps(e)
+    local tl = { x = e.bounds.x, y = e.bounds.y }
+    local tr = { x = e.bounds.x + e.bounds.width, y = e.bounds.y }
+    local bl = { x = e.bounds.x, y = e.bounds.y + e.bounds.height }
+    local br = { x = e.bounds.x + e.bounds.width, y = e.bounds.y + e.bounds.height }
+    return self:containsPoint(tl)
+        or self:containsPoint(tr)
+        or self:containsPoint(bl)
+        or self:containsPoint(br)
+end
+
+function Entity:collideWith(e)
+    self.colliding = true
+end
+
+function Entity:endCollision(e)
 end
 
 function Entity:wasClicked()
@@ -64,6 +174,10 @@ function Entity:isClicked()
     return touch ~= nil and self:containsPoint(ctrl.touch())
 end
 
+PLANT_SPRITE_Y_OFFSET = -16
+PLANT_SPRITE_WIDTH = 16
+PLANT_SPRITE_HEIGHT = 16
+
 PLANT_TYPES = {
     BURIED = 0,
     OVERGROUND = 1,
@@ -72,16 +186,18 @@ PLANT_TYPES = {
 
 local Plant = Entity:new({
     bounds = { x = 0, y = 0 },
-    radius = 0,
-    height = 0,
     colour = 4,
     water = 0,
-    minRadius = PLANT_MIN_RADIUS,
-    maxRadius = PLANT_MAX_RADIUS,
     type = PLANT_TYPES.OVERGROUND,
     species = 0,
     stage = 0
  })
+
+ function Plant:new(o)
+    o = o or {}
+    o.bounds.y = o.bounds.y
+    return Entity.new(self, o)
+ end
 
 function Plant:consumeWater()
     local w = _clamp(0, self.water - GAME_RUNTIME_CONFIG.WATER_DECAY_RATE, 1)
@@ -89,18 +205,11 @@ function Plant:consumeWater()
 end
 
 function Plant:addWater()
-    if(self:isClicked())
-    then
-        self.water = _clamp(0, self.water + GAME_RUNTIME_CONFIG.WATER_ADD_RATE, 1)
-    end
+    self.water = _clamp(0, self.water + GAME_RUNTIME_CONFIG.WATER_ADD_RATE, 1)
 end
 
 function Plant:updateGrowth()
     self.stage = _clamp(0, math.floor(self.water / 0.2), 4)
-end
-
-function Plant:updateSize()
-    self.radius = _clamp(self.minRadius, self.maxRadius * self.water, self.maxRadius)
 end
 
 function Plant:isAlive()
@@ -108,8 +217,8 @@ function Plant:isAlive()
 end
 
 function Plant:updateBounds()
-    self.bounds.width = 16 -- self.radius * 2
-    self.bounds.height = 16 -- self.radius * 2
+    self.bounds.width = PLANT_SPRITE_WIDTH
+    self.bounds.height = PLANT_SPRITE_HEIGHT
 end
 
 function Plant:update()
@@ -117,15 +226,13 @@ function Plant:update()
     then
         self:updateGrowth()
         self:consumeWater()
-        self:addWater()
-        self:updateSize()
     end
 end
 
 function Plant:draw()
     Entity.draw(self)
     spr.sheet(self.type)
-    spr.sdraw(self.bounds.x, self.bounds.y - 16, self.stage * 16, self.species, 16, 30, false, false)
+    spr.sdraw(self.bounds.x, self.bounds.y - self.bounds.height, self.stage * PLANT_SPRITE_WIDTH, self.species * (PLANT_SPRITE_HEIGHT * 2), PLANT_SPRITE_WIDTH, PLANT_SPRITE_HEIGHT * 2, false, false)
 
     -- Water bar
     shape.rectf(self.bounds.x, self.bounds.y + self.bounds.height + 4, self.bounds.width, 2, 2)
@@ -217,7 +324,7 @@ function ButtonBar:removeButton(id)
 end
 
 function ButtonBar:getButton(id)
-    for i, b in ipairs(self.buttons) do
+    for _, b in ipairs(self.buttons) do
         if(b.id == id)
         then
             return b
@@ -334,23 +441,41 @@ function State:new(o)
     setmetatable(o, self)
     self.__index = self
     self.buttons = ButtonBar:new()
+    self.entities = EntityCollection:new({
+        entities = { self.buttons }
+    })
+    self.active = false
+    
     return o
 end
 
 function State:enter()
-    self.buttons:addButton(Button:new({
+    self.active = true
+    local dbg_button = Button:new({
         id = "debug_button",
         text = "DEBUG: OFF",
         bounds = {x = 0, y = 0, width = 50, height = 10},
         onClick = {function (b) setDebug(not GAME_RUNTIME_CONFIG.DEBUG_ENTITY_BOUNDS) end}
-    }))
+    })
+
+    self.entities:add(dbg_button)
+    self.buttons:addButton(dbg_button)
+end
+
+function State:isActive()
+    return self.active
 end
 
 function State:exit()
+    self.active = false
+    local dbg_button = self.buttons:getButton("debug_button")
     self.buttons:removeButton("debug_button")
+    self.entities:remove(dbg_button)
 end
 
 function State:update()
+    -- self.entities:checkCollisions()
+
     if(GAME_RUNTIME_CONFIG.DEBUG_ENTITY_BOUNDS)
     then
         self.buttons:getButton("debug_button").text = "DEBUG: ON"
@@ -394,10 +519,13 @@ TOOLS = {
 
 local Cursor = Entity:new({
     tool = TOOLS.WATER,
-    colour = 3
+    colour = 3,
+    bounds = {x = 0, y = 0, width = 10, height = 10}
 })
 
 -- PARTICLES
+WATER_PARTICLE_COLOURS = {2, 3, 4}
+SEED_PARTICLE_COLOURS = {12,13,14}
 local Particles = {
     x = {0}, -- x position of the particle
     y = {0}, -- y position of the particle
@@ -492,12 +620,10 @@ function Particles:__draw(particle)
 end
 -- END PARTICLES
 
-WATER_PARTICLE_COLOURS = {2, 3, 4}
+
 function Cursor:new(o)
     o = o or {}
-    o.count = 0
     o.using = false
-    o.stage = 0
     o = Entity.new(self, o)
 
     Cursor.setTool(self, o.tool)
@@ -511,38 +637,58 @@ function Cursor:initWaterParticles()
         y = { 0  },
         sx = { 0 },
         sy = 1,
-        colors = {2, 3, 4},
+        colors = WATER_PARTICLE_COLOURS,
         ttl = { 0.5 },
         radius = { 0.25 },
     })
-    self.generator.colors = WATER_PARTICLE_COLOURS
     self.generator:_update()
 end
 
-function Cursor:update()
-    Entity.update(self)
+function Cursor:initSeedParticles()
+    self.generator = new(Particles, {
+        x = { 0 },
+        y = { 0  },
+        sx = { 0 },
+        sy = 1,
+        colors = SEED_PARTICLE_COLOURS,
+        ttl = { 0.5 },
+        radius = { 0.25 },
+    })
+    self.generator:_update()
+end
+
+function Cursor:update(garden)
     local t = ctrl.touch()
-    self.bounds.x = t.x
-    self.bounds.y = t.y
+    self.bounds.x = t.x - self.bounds.width * 0.5
+    self.bounds.y = t.y - self.bounds.height * 0.5
     
-    self:updateStatus()
+    Entity.update(self)
+    self:updateStatus(garden)
     self:updateTool()
 end
 
-function Cursor:updateStatus()
-    if(ctrl.touched(0))
+function Cursor:updateStatus(garden)
+    if(garden:overlaps(self))
     then
-        if(not self.using)
+        if(ctrl.touched(0))
         then
+            if(not self.using)
+            then
+                self.count = 0
+            end
+            self.using = true
+        elseif(ctrl.touching(0))
+        then
+            if(self.tool == TOOLS.SEEDS)
+            then
+                self.using = false
+            end
+        else
+            self.using = false
             self.count = 0
         end
-        self.using = true
-    elseif(ctrl.touching(0))
-    then
-        self.count = self.count + tiny.dt
     else
         self.using = false
-        self.count = 0
     end
 end
 
@@ -577,7 +723,6 @@ function Cursor:updateWater()
         self.generator.sx = 0
         self.generator.sy = 1
         self.generator.ttl = 1
-        --self.generator.sr = math.rnd(1, 5)
         self.generator:emit(3)
         self.stage = _clamp(0, math.floor(((self.count) * (1 / 18) * 200)), 18)
         if(self.stage >= 18)
@@ -596,40 +741,204 @@ end
 function Cursor:updateSeeds()
     if(self.using)
     then
+        local p = ctrl.touch()
+        self.generator.x = { p.x, p.x - 3, p.x + 3 }
+        self.generator.y = { p.y - 10 , p.y - 10, p.y - 10}
+        self.generator.radius = 2
+        self.generator.sx = 0
+        self.generator.sy = 0.25
+        self.generator.sr = 0.05
+        self.generator.ttl = 0.5
+        self.generator:emit(3)
+    end
+
+    if(self.generator ~= nil)
+    then
+        self.generator:_update()
     end
 end
 
 function Cursor:drawWater()
-    if(self.using)
-    then
-        self.generator:_draw()
-        -- spr.sheet(3)
-        -- spr.sdraw(self.bounds.x - 8, self.bounds.y, self.stage * 18, 0, 16, 16, false, false)
-    end
+    self.generator:_draw()
+end
+
+function Cursor:drawSeeds()
+    self.generator:_draw()
 end
 
 function Cursor:draw()
-    if(self.using)
+    Entity.draw(self)
+    if(self.tool == TOOLS.WATER)
     then
-        if(self.tool == TOOLS.WATER)
-        then
-            self:drawWater()
-        elseif (self.tool == TOOLS.SEEDS)
-        then
-            self:drawSeeds()
-        end
+        self:drawWater()
+    elseif (self.tool == TOOLS.SEEDS)
+    then
+        self:drawSeeds()
     end
 end
 
+GARDEN_BOUNDS = {x = 20, y = 20, width = 240 - 20, height = 240 - 20}
 
+local Garden = Entity:new({
+    bounds = GARDEN_BOUNDS,
+    colour = 6
+})
+
+function Garden:new(o)
+    o = o or {}
+    o.bounds = o.bounds or GARDEN_BOUNDS
+    o.plants = o.plants or {}
+    o.colour = o.colour or 6
+    return Entity.new(self, o)
+end
+
+function Garden:randomisePlants(n)
+    for i = 1, n, 1 do
+        self:addRandomPlant()
+    end
+end
+
+function Garden:randomPlant()
+    local x = math.rnd(self.bounds.x, self.bounds.width)
+    local y = math.rnd(self.bounds.y, self.bounds.height)
+    return self:randomPlantAt({x = x, y = y}, 1)
+end
+
+function Garden:randomPlantAt(position, water)
+    return Plant:new({
+        bounds = {
+            x = position.x,
+            y = position.y,
+            width = PLANT_SPRITE_WIDTH,
+            height = PLANT_SPRITE_HEIGHT
+        },
+        species = math.rnd(0, 5),
+        type = math.rnd(0, 3),
+        stage = 0,
+        water = water
+    })
+end
+
+function Garden:addRandomPlant()
+    local p = self:randomPlant()
+    self:addPlant(p)
+end
+
+function Garden:addPlant(p)
+    table.insert(self.plants, p)
+end
+
+function Garden:addRandomPlantAt(position)
+    local p = self:randomPlantAt(position, 0)
+    self:addPlant(p)
+end
+
+function Garden:update(cursor, season)
+    Entity.update(self)
+    self.colour = SEASON_COLOURS[season]
+    for _, p in ipairs(self.plants) do
+        if(cursor.using and p:overlaps(cursor) and not GAME_RUNTIME_CONFIG.PAUSED)
+        then
+            p:addWater()
+        end
+
+        p:update()
+    end
+
+    if(cursor.using and cursor.tool == TOOLS.SEEDS and self:overlaps(cursor))
+    then
+        self:addRandomPlantAt({x = cursor.bounds.x, y = cursor.bounds.y})
+    end
+end
+
+function Garden:anyPlantsAlive()
+    for _, p in ipairs(self.plants) do
+        if(p:isAlive())
+        then
+            return true
+        end
+    end
+    
+    return false
+end
+
+function Garden:draw()
+    Entity.draw(self)
+    shape.rect(self.bounds.x - 1, self.bounds.y - 1 , self.bounds.width + 2, self.bounds.height + 2, 14)
+    shape.rectf(self.bounds.x, self.bounds.y, self.bounds.width, self.bounds.height, self.colour)
+
+    for _, p in ipairs(self.plants) do
+        p:draw()
+    end
+end
+
+SEASONS = {
+    "SPRING",
+    "SUMMER",
+    "AUTUMN",
+    "WINTER"
+}
+
+SEASON_COLOURS = {
+    SPRING = 9,
+    SUMMER = 5,
+    AUTUMN = 7,
+    WINTER = 2
+}
+
+local Seasons = Entity:new({
+
+})
+
+function Seasons:new(o)
+    o = o or {}
+    o.bounds = {x = 20, y = 12, width = 240 - 20, height = 4}
+    o.progress = 0
+    o.rate = 0.05
+    return Entity.new(self, o)
+end
+
+function Seasons:update()
+    local p = self.progress + (tiny.dt * self.rate)
+    if(p > 1)
+    then
+        p = 0
+    end
+    self.progress = _clamp(0, p, 1)
+end
+
+function Seasons:draw()
+    shape.rectf(self.bounds.x, self.bounds.y, self.bounds.width, 4, 2)
+    shape.rectf(self.bounds.x, self.bounds.y, self.bounds.width * 0.25, 4, SEASON_COLOURS["SPRING"])
+    shape.rectf(self.bounds.x + (self.bounds.width * 0.25), self.bounds.y, self.bounds.width * 0.25, 4, SEASON_COLOURS["SUMMER"])
+    shape.rectf(self.bounds.x + (self.bounds.width * 0.5), self.bounds.y, self.bounds.width * 0.25, 4, SEASON_COLOURS["AUTUMN"])
+    shape.rectf(self.bounds.x + (self.bounds.width * 0.75), self.bounds.y, self.bounds.width * 0.25, 4, SEASON_COLOURS["WINTER"])
+
+    shape.circlef(self.bounds.x + self.bounds.width * self.progress, self.bounds.y + 2, 4, 15)
+end
+
+function Seasons:currentSeason()
+    local s = math.floor(juice.linear(1, 5, self.progress))
+    return SEASONS[s]
+end
 
 local Game = State:new()
 function Game:enter()
     State.enter(self)
+    self.garden = Garden:new({
+        bounds = GARDEN_BOUNDS,
+        colour = SEASON_COLOURS["SPRING"]
+    })
+    self.entities:add(self.garden)
+    self.garden:randomisePlants(10)
+    self.seasons = Seasons:new({})
+
     self.cursor = Cursor:new({
         tool = TOOLS.WATER,
-        colour = 3
+        colour = 3,
+        bounds = {x = 0, y = 0, width = 5, height = 5}
     })
+    self.entities:add(self.cursor)
 
     self.buttons:addButton(Button:new{
         id = "pause_button", 
@@ -640,7 +949,7 @@ function Game:enter()
 
     self.tools = ToggleBar:new({
         bounds = {
-            x = 10,
+            x = 5,
             y = 20,
             width = 10
         },
@@ -650,49 +959,35 @@ function Game:enter()
                 id = "water_button",
                 text = "W",
                 bounds = {x = 0, y = 0, width = 10, height = 10},
-                on = true
+                on = true,
+                onClick = {function(b) self.cursor:setTool(TOOLS.WATER) end}
             }),
             Toggle:new({
                 id = "seed_button",
                 text = "S",
                 bounds = {x = 0, y = 0, width = 10, height = 10},
-                on = false
+                on = false,
+                onClick = {function(b) self.cursor:setTool(TOOLS.SEEDS) end}
             })
         }
     })
     self.tools:layout()
-    self:randomisePlants(10)
+    self:startMusic()
 end
 
-function Game:randomisePlants(n)
-    self.plants = {}
-    for i = 1, n, 1 do
-        local x = math.rnd(16, 240)
-        local y = math.rnd(16, 240)
-        local rMax = math.rnd(PLANT_MAX_RADIUS * 0.5, PLANT_MAX_RADIUS)
-        local rMin = math.rnd(PLANT_MIN_RADIUS, PLANT_MAX_RADIUS * 0.25)
-        local r = math.rnd(rMin, rMax)
-        self.plants[i] = Plant:new({
-            bounds = {
-                x = x,
-                y = y,
-                width = 16,
-                height = 16
-            },
-            maxRadius = rMax,
-            minRadius = rMin,
-            colour = PLANT_COLOURS[math.rnd(#PLANT_COLOURS)],
-            species = math.rnd(0, 6),
-            type = math.rnd(0, 3),
-            stage = 0,
-            water = 1
-        })
-    end
+function Game:startMusic()
+    self:stopMusic()
+    sfx.loop(1)
+end
+
+function Game:stopMusic()
+    sfx.stop(1)
 end
 
 function Game:exit()
     State.exit(self)
     self.buttons:removeButton("pause_button")
+    self:stopMusic()
 end
 
 function Game:update()
@@ -706,41 +1001,26 @@ function Game:update()
     end
 
     self.tools:update()
-    self.cursor:update()
+    self.cursor:update(self.garden)
 
-    local gameOver = true
-    for _, p in ipairs(self.plants) do
-        p:update()
-        if(p:isAlive())
-        then
-            gameOver = false
-        end
+    if(not GAME_RUNTIME_CONFIG.PAUSED)
+    then
+        self.seasons:update()
+        self.seasons:currentSeason()
+        self.garden:update(self.cursor, self.seasons:currentSeason())
     end
 
-    if(gameOver and GAME_RUNTIME_CONFIG.DEBUG_ALLOW_GAME_END)
+    local gameover = self.garden:anyPlantsAlive()
+    if(not (gameover) and GAME_RUNTIME_CONFIG.DEBUG_ALLOW_GAME_END)
     then
         setState(STATE_GAME_OVER)
     end
 end
 
-function Game:drawTerrain()
-    for x = 0, 256, 1 do
-        for y = 256, 0, -1 do
-            nx = math.sin(x)
-            ny = math.sin(y)
-            gfx.pset(x, y, nx + ny < 0.5 and TERRAIN_COLOURS[1] or TERRAIN_COLOURS[2])
-        end
-    end
-end
-
 function Game:draw()
     State.draw(self)
-
-    -- self:drawTerrain()
-    for _, p in ipairs(self.plants) do
-        p:draw()
-    end
-
+    self.garden:draw()
+    self.seasons:draw()
     self.tools:draw()
     self.cursor:draw()
 end
@@ -786,27 +1066,21 @@ STATES = {
 -- End Game State
 
 function setState(s)
-    debug("setting state ")
     STATES[GAME_STATE]:exit()
     GAME_STATE = s
     STATES[GAME_STATE]:enter()
 end
 
 function _init()
-    debug("init")
-    GAME_STATE = STATE_GAME
+    GAME_STATE = STATE_MENU
     STATES[GAME_STATE]:enter()
 end
 
 function _update()
     STATES[GAME_STATE]:update()
-
-    if(ctrl.touched(0)) then
-        debug("touched")
-    end
 end
 
 function _draw()
-    gfx.cls(5)
+    gfx.cls(6)
     STATES[GAME_STATE]:draw()
 end

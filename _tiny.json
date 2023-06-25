@@ -19,7 +19,7 @@
         "#2E994E",
         "#F29066",
         "#E65050",
-        "#707D7C",
+        "#ade072",
         "#293C40",
         "#170B1A",
         "#0A010D",
@@ -36,5 +36,8 @@
         "img/vegetables-overground.png",
         "img/vegetables-tall.png",
         "img/splash.png"
+    ],
+    "sounds": [
+        "music/bounce.mid"
     ]
 }
